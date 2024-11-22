@@ -480,36 +480,18 @@ class MobileScanner(
     fun invertInputImage(imageProxy: ImageProxy): InputImage {
         val image = imageProxy.image ?: throw IllegalArgumentException("Image is null")
 
-        // Convert YUV_420_888 image to NV21 format
-        // based on our util helper
-        val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
-        YuvToRgbConverter(activity).yuvToRgb(image, bitmap)
+        val buffer = image.planes[0].buffer
+        val data = ByteArray(buffer.remaining())
+        buffer.get(data)
 
-        // Invert RGB values
-        invertBitmapColors(bitmap)
-
-        return InputImage.fromBitmap(bitmap, imageProxy.imageInfo.rotationDegrees)
-    }
-
-    // Helper function to invert the colors of the bitmap
-    private fun invertBitmapColors(bitmap: Bitmap) {
-        val width = bitmap.width
-        val height = bitmap.height
-        for (x in 0 until width) {
-            for (y in 0 until height) {
-                val pixel = bitmap.getPixel(x, y)
-                val invertedColor = invertColor(pixel)
-                bitmap.setPixel(x, y, invertedColor)
-            }
+        for (i in data.indices) {
+            data[i] = (255 - data[i].toInt()).toByte()
         }
-    }
 
-    private fun invertColor(pixel: Int): Int {
-        val alpha = pixel and 0xFF000000.toInt()
-        val red = 255 - (pixel shr 16 and 0xFF)
-        val green = 255 - (pixel shr 8 and 0xFF)
-        val blue = 255 - (pixel and 0xFF)
-        return alpha or (red shl 16) or (green shl 8) or blue
+        buffer.rewind()
+        buffer.put(data)
+
+        return InputImage.fromMediaImage(image, imageProxy.imageInfo.rotationDegrees)
     }
 
     /**
