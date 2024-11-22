@@ -11,6 +11,9 @@ import AVFoundation
 import MLKitVision
 import MLKitBarcodeScanning
 
+import CoreImage
+import CoreImage.CIFilterBuiltins
+
 typealias MobileScannerCallback = ((Array<Barcode>?, Error?, UIImage) -> ())
 typealias TorchModeChangeCallback = ((Int?) -> ())
 typealias ZoomScaleChangeCallback = ((Double?) -> ())
@@ -58,6 +61,8 @@ public class MobileScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     
     public var timeoutSeconds: Double = 0
 
+    private var invertImage: Bool = false
+    
     init(registry: FlutterTextureRegistry?, mobileScannerCallback: @escaping MobileScannerCallback, torchModeChangeCallback: @escaping TorchModeChangeCallback, zoomScaleChangeCallback: @escaping ZoomScaleChangeCallback) {
         self.registry = registry
         self.mobileScannerCallback = mobileScannerCallback
@@ -137,9 +142,18 @@ public class MobileScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             nextScanTime = currentTime + timeoutSeconds
             imagesCurrentlyBeingProcessed = true
             
-            let ciImage = latestBuffer.image
+            let uiImage = latestBuffer.image
 
-            let image = VisionImage(image: ciImage)
+            let image: VisionImage
+            
+            // Invert every 2nd frame to support inverted codes
+            if invertImage {
+                image = VisionImage(image: createInvertedImage(uiImage: uiImage))
+            } else {
+                image = VisionImage(image: uiImage)
+            }
+            invertImage = !invertImage
+            
             image.orientation = imageOrientation(
                 deviceOrientation: UIDevice.current.orientation,
                 defaultOrientation: .portrait,
@@ -163,11 +177,43 @@ public class MobileScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
                     }
                 }
 
-                mobileScannerCallback(barcodes, error, ciImage)
+                mobileScannerCallback(barcodes, error, uiImage)
             }
         }
     }
 
+    func colorInvert(inputImage: CIImage) -> CIImage? {
+        if #available(iOS 13.0, *) {
+            let colorInvertFilter = CIFilter.colorInvert()
+            colorInvertFilter.inputImage = inputImage
+            return colorInvertFilter.outputImage
+        } else {
+            // Fallback on earlier versions
+            return inputImage
+        }
+    }
+    
+    func createInvertedImage(uiImage: UIImage) -> UIImage {
+        // Create inverted image using Core Image filter
+        if let ciImage = CIImage(image: uiImage) {
+            if let invertedCIImage = colorInvert(inputImage: ciImage),
+               let invertedCGImage = convertCIImageToCGImage(inputImage: invertedCIImage)
+            {
+                return UIImage(cgImage: invertedCGImage)
+            }
+        }
+        
+        return uiImage
+    }
+    
+    private func convertCIImageToCGImage(inputImage: CIImage) -> CGImage? {
+        let context = CIContext(options: [.useSoftwareRenderer: false])
+        if let cgImage = context.createCGImage(inputImage, from: inputImage.extent) {
+            return cgImage
+        }
+        return nil
+    }
+    
     /// Start scanning for barcodes
     func start(barcodeScannerOptions: BarcodeScannerOptions?, cameraPosition: AVCaptureDevice.Position, torch: Bool, detectionSpeed: DetectionSpeed, completion: @escaping (MobileScannerStartParameters) -> ()) throws {
         self.detectionSpeed = detectionSpeed
