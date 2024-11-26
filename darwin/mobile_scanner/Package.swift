@@ -6,6 +6,7 @@ import PackageDescription
 let package = Package(
     name: "mobile_scanner",
     platforms: [
+        .iOS("12.0"),
         .macOS("10.14")
     ],
     products: [
@@ -17,8 +18,7 @@ let package = Package(
             name: "mobile_scanner",
             dependencies: [],
             resources: [
-                // To add other resources, see the instructions at
-                // https://developer.apple.com/documentation/xcode/bundling-resources-with-a-swift-package
+                .process("Resources"),
             ]
         )
     ]

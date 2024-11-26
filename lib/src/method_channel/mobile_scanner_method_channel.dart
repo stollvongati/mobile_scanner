@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:mobile_scanner/src/enums/barcode_format.dart';
 import 'package:mobile_scanner/src/enums/mobile_scanner_authorization_state.dart';
 import 'package:mobile_scanner/src/enums/mobile_scanner_error_code.dart';
 import 'package:mobile_scanner/src/enums/torch_state.dart';
@@ -15,6 +16,14 @@ import 'package:mobile_scanner/src/objects/start_options.dart';
 
 /// An implementation of [MobileScannerPlatform] that uses method channels.
 class MethodChannelMobileScanner extends MobileScannerPlatform {
+  /// The name of the barcode event that is sent when a barcode is scanned.
+  @visibleForTesting
+  static const String kBarcodeEventName = 'barcode';
+
+  /// The name of the error event that is sent when a barcode scan error occurs.
+  @visibleForTesting
+  static const String kBarcodeErrorEventName = 'MOBILE_SCANNER_BARCODE_ERROR';
+
   /// The method channel used to interact with the native platform.
   @visibleForTesting
   final methodChannel = const MethodChannel(
@@ -78,6 +87,19 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
     );
   }
 
+  /// Parse a [MobileScannerBarcodeException] from the given [error] and [stackTrace], and throw it.
+  ///
+  /// If the error is not a [PlatformException],
+  /// with [kBarcodeErrorEventName] as [PlatformException.code], the error is rethrown as-is.
+  Never _parseBarcodeError(Object error, StackTrace stackTrace) {
+    if (error case PlatformException(:final String code, :final String? message)
+        when code == kBarcodeErrorEventName) {
+      throw MobileScannerBarcodeException(message);
+    }
+
+    Error.throwWithStackTrace(error, stackTrace);
+  }
+
   /// Request permission to access the camera.
   ///
   /// Throws a [MobileScannerException] if the permission is not granted.
@@ -120,9 +142,12 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
 
   @override
   Stream<BarcodeCapture?> get barcodesStream {
+    // Handle incoming barcode events.
+    // The error events are transformed to `MobileScannerBarcodeException` where possible.
     return eventsStream
-        .where((event) => event['name'] == 'barcode')
-        .map((event) => _parseBarcode(event));
+        .where((e) => e['name'] == kBarcodeEventName)
+        .map((event) => _parseBarcode(event))
+        .handleError(_parseBarcodeError);
   }
 
   @override
@@ -140,14 +165,34 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
   }
 
   @override
-  Future<BarcodeCapture?> analyzeImage(String path) async {
-    final Map<Object?, Object?>? result =
-        await methodChannel.invokeMapMethod<Object?, Object?>(
-      'analyzeImage',
-      path,
-    );
+  Future<BarcodeCapture?> analyzeImage(
+    String path, {
+    List<BarcodeFormat> formats = const <BarcodeFormat>[],
+  }) async {
+    try {
+      final Map<Object?, Object?>? result =
+          await methodChannel.invokeMapMethod<Object?, Object?>(
+        'analyzeImage',
+        {
+          'filePath': path,
+          'formats': formats.isEmpty
+              ? null
+              : [
+                  for (final BarcodeFormat format in formats)
+                    if (format != BarcodeFormat.unknown) format.rawValue,
+                ],
+        },
+      );
 
-    return _parseBarcode(result);
+      return _parseBarcode(result);
+    } on PlatformException catch (error) {
+      // Handle any errors from analyze image requests.
+      if (error.code == kBarcodeErrorEventName) {
+        throw MobileScannerBarcodeException(error.message);
+      }
+
+      return null;
+    }
   }
 
   @override
@@ -175,8 +220,7 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
       throw const MobileScannerException(
         errorCode: MobileScannerErrorCode.controllerAlreadyInitialized,
         errorDetails: MobileScannerErrorDetails(
-          message:
-              'The scanner was already started. Call stop() before calling start() again.',
+          message: 'The scanner was already started.',
         ),
       );
     }
@@ -192,7 +236,7 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
       );
     } on PlatformException catch (error) {
       throw MobileScannerException(
-        errorCode: MobileScannerErrorCode.genericError,
+        errorCode: MobileScannerErrorCode.fromPlatformException(error),
         errorDetails: MobileScannerErrorDetails(
           code: error.code,
           details: error.details as Object?,
@@ -228,17 +272,13 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
       startResult['currentTorchState'] as int? ?? -1,
     );
 
-    final Map<Object?, Object?>? sizeInfo =
-        startResult['size'] as Map<Object?, Object?>?;
-    final double? width = sizeInfo?['width'] as double?;
-    final double? height = sizeInfo?['height'] as double?;
-
     final Size size;
 
-    if (width == null || height == null) {
-      size = Size.zero;
-    } else {
+    if (startResult['size']
+        case {'width': final double width, 'height': final double height}) {
       size = Size(width, height);
+    } else {
+      size = Size.zero;
     }
 
     return MobileScannerViewAttributes(

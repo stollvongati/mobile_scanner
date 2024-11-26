@@ -1,8 +1,15 @@
 import AVFoundation
-import FlutterMacOS
 import Vision
-import AppKit
 import VideoToolbox
+
+#if os(iOS)
+  import Flutter
+  import UIKit
+  import MobileCoreServices
+#else
+  import AppKit
+  import FlutterMacOS
+#endif
 
 public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, FlutterTexture, AVCaptureVideoDataOutputSampleBufferDelegate {
     
@@ -38,12 +45,26 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     
     var position = AVCaptureDevice.Position.back
     
+    var standardZoomFactor: CGFloat = 1
+    
     public static func register(with registrar: FlutterPluginRegistrar) {
-        let instance = MobileScannerPlugin(registrar.textures)
+        #if os(iOS)
+        let textures = registrar.textures()
+        #else
+        let textures = registrar.textures
+        #endif
+        
+        #if os(iOS)
+        let messenger = registrar.messenger()
+        #else
+        let messenger = registrar.messenger
+        #endif
+        
+        let instance = MobileScannerPlugin(textures)
         let method = FlutterMethodChannel(name:
-                                            "dev.steenbakker.mobile_scanner/scanner/method", binaryMessenger: registrar.messenger)
+                                            "dev.steenbakker.mobile_scanner/scanner/method", binaryMessenger: messenger)
         let event = FlutterEventChannel(name:
-                                            "dev.steenbakker.mobile_scanner/scanner/event", binaryMessenger: registrar.messenger)
+                                            "dev.steenbakker.mobile_scanner/scanner/event", binaryMessenger: messenger)
         registrar.addMethodCallDelegate(instance, channel: method)
         event.setStreamHandler(instance)
     }
@@ -71,6 +92,8 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             stop(result)
         case "updateScanWindow":
             updateScanWindow(call, result)
+        case "analyzeImage":
+            analyzeImage(call, result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -124,12 +147,14 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                 VTCreateCGImageFromCVPixelBuffer(self!.latestBuffer, options: nil, imageOut: &cgImage)
                 let imageRequestHandler = VNImageRequestHandler(cgImage: cgImage!)
                 do {
-                    let barcodeRequest:VNDetectBarcodesRequest = VNDetectBarcodesRequest(completionHandler: { [weak self] (request, error) in
+                    let barcodeRequest: VNDetectBarcodesRequest = VNDetectBarcodesRequest(completionHandler: { [weak self] (request, error) in
                         self?.imagesCurrentlyBeingProcessed = false
                         
                         if error != nil {
                             DispatchQueue.main.async {
-                                self?.sink?(FlutterError(code: "MobileScanner", message: error?.localizedDescription, details: nil))
+                                self?.sink?(FlutterError(
+                                    code: MobileScannerErrorCodes.BARCODE_ERROR,
+                                    message: error?.localizedDescription, details: nil))
                             }
                             return
                         }
@@ -144,7 +169,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                         
                         let barcodes: [VNBarcodeObservation] = results.compactMap({ barcode in
                             // If there is a scan window, check if the barcode is within said scan window.
-                            if self?.scanWindow != nil && cgImage != nil && !(self?.isBarCodeInScanWindow(self!.scanWindow!, barcode, cgImage!) ?? false) {
+                            if self?.scanWindow != nil && cgImage != nil && !(self?.isBarcodeInsideScanWindow(barcodeObservation: barcode, imageSize: CGSize(width: cgImage!.width, height: cgImage!.height)) ?? false) {
                                 return nil
                             }
                             
@@ -152,22 +177,28 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                         })
                         
                         DispatchQueue.main.async {
-                            if (!MobileScannerPlugin.returnImage) {
+                            guard let image = cgImage else {
+                            // Image not known, default image size to 1
                                 self?.sink?([
                                     "name": "barcode",
-                                    "data": barcodes.map({ $0.toMap() }),
+                                    "data": barcodes.map({ $0.toMap(width: 1, height: 1) }),
                                 ])
                                 return
                             }
-                                                        
+                            
+                            // The image dimensions are always provided.
+                            // The image bytes are only non-null when `returnImage` is true.
+                            let imageData: [String: Any?] = [
+                                "bytes": MobileScannerPlugin.returnImage ? FlutterStandardTypedData(bytes: image.jpegData(compressionQuality: 0.8)!) : nil,
+                                "width": Double(image.width),
+                                "height": Double(image.height),
+                            ]
+                            
+                            
                             self?.sink?([
                                 "name": "barcode",
-                                "data": barcodes.map({ $0.toMap() }),
-                                "image": cgImage == nil ? nil : [
-                                    "bytes": FlutterStandardTypedData(bytes: cgImage!.jpegData(compressionQuality: 0.8)!),
-                                    "width": Double(cgImage!.width),
-                                    "height": Double(cgImage!.height),
-                                ],
+                                "data": barcodes.map({ $0.toMap(width: image.width, height: image.height) }),
+                                "image": imageData,
                             ])
                         }
                     })
@@ -178,9 +209,11 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                     }
 
                     try imageRequestHandler.perform([barcodeRequest])
-                } catch let e {
+                } catch let error {
                     DispatchQueue.main.async {
-                        self?.sink?(FlutterError(code: "MobileScanner", message: e.localizedDescription, details: nil))
+                        self?.sink?(FlutterError(
+                            code: MobileScannerErrorCodes.BARCODE_ERROR,
+                            message: error.localizedDescription, details: nil))
                     }
                 }
             }
@@ -188,7 +221,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     }
     
     func checkPermission(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
-        if #available(macOS 10.14, *) {
+        if #available(iOS 12.0, macOS 10.14, *) {
             let status = AVCaptureDevice.authorizationStatus(for: .video)
             switch status {
             case .notDetermined:
@@ -204,7 +237,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     }
     
     func requestPermission(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
-        if #available(macOS 10.14, *) {
+        if #available(iOS 12.0, macOS 10.14, *) {
             AVCaptureDevice.requestAccess(for: .video, completionHandler: { result($0) })
         } else {
             result(0)
@@ -230,38 +263,52 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         result(nil)
     }
     
-    func isBarCodeInScanWindow(_ scanWindow: CGRect, _ barcode: VNBarcodeObservation, _ inputImage: CGImage) -> Bool {
-        let imageWidth = CGFloat(inputImage.width)
-        let imageHeight = CGFloat(inputImage.height)
-
-        let minX = scanWindow.minX * imageWidth
-        let minY = scanWindow.minY * imageHeight
-        let width = scanWindow.width * imageWidth
-        let height = scanWindow.height * imageHeight
-
-        let scaledScanWindow = CGRect(x: minX, y: minY, width: width, height: height)
-        return scaledScanWindow.contains(barcode.boundingBox)
+    func isBarcodeInsideScanWindow(barcodeObservation: VNBarcodeObservation, imageSize: CGSize) -> Bool {
+        let boundingBox = barcodeObservation.boundingBox
+        
+        // Adjust boundingBox by inverting the y-axis
+        let adjustedBoundingBox = CGRect(
+            x: boundingBox.minX,
+            y: 1.0 - boundingBox.maxY,
+            width: boundingBox.width,
+            height: boundingBox.height
+        )
+        
+        let intersects = scanWindow!.contains(adjustedBoundingBox)
+        
+        // Check if the adjusted bounding box intersects with or is within the scan window
+        return intersects
     }
 
-    func isBarCodeInScanWindow(_ scanWindow: CGRect, _ barcode: VNBarcodeObservation, _ inputImage: CVImageBuffer) -> Bool {
-        let size = CVImageBufferGetEncodedSize(inputImage)
+    
+    private func getVideoOrientation() -> AVCaptureVideoOrientation {
+#if os(iOS)
+        var videoOrientation: AVCaptureVideoOrientation
 
-        let imageWidth = size.width
-        let imageHeight = size.height
+        switch UIDevice.current.orientation {
+        case .portrait:
+            videoOrientation = .portrait
+        case .portraitUpsideDown:
+            videoOrientation = .portraitUpsideDown
+        case .landscapeLeft:
+            videoOrientation = .landscapeLeft
+        case .landscapeRight:
+            videoOrientation = .landscapeRight
+        default:
+            videoOrientation = .portrait
+        }
 
-        let minX = scanWindow.minX * imageWidth
-        let minY = scanWindow.minY * imageHeight
-        let width = scanWindow.width * imageWidth
-        let height = scanWindow.height * imageHeight
-
-        let scaledScanWindow = CGRect(x: minX, y: minY, width: width, height: height)
-        return scaledScanWindow.contains(barcode.boundingBox)
+        return videoOrientation
+#else
+        return .portrait
+#endif
     }
+    
 
     func start(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
         if (device != nil || captureSession != nil) {
-            result(FlutterError(code: "MobileScanner",
-                                message: "Called start() while already started!",
+            result(FlutterError(code: MobileScannerErrorCodes.ALREADY_STARTED_ERROR,
+                                message: MobileScannerErrorCodes.ALREADY_STARTED_ERROR_MESSAGE,
                                 details: nil))
             return
         }
@@ -271,7 +318,6 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
 
         let argReader = MapArgumentReader(call.arguments as? [String: Any])
 
-        // let ratio: Int = argReader.int(key: "ratio")
         let torch:Bool = argReader.bool(key: "torch") ?? false
         let facing:Int = argReader.int(key: "facing") ?? 1
         let speed:Int = argReader.int(key: "speed") ?? 0
@@ -293,99 +339,116 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         }
         
         if (device == nil) {
-            result(FlutterError(code: "MobileScanner",
-                                message: "No camera found or failed to open camera!",
+            result(FlutterError(code: MobileScannerErrorCodes.NO_CAMERA_ERROR,
+                                message: MobileScannerErrorCodes.NO_CAMERA_ERROR_MESSAGE,
                                 details: nil))
             return
         }
         
-        // Turn on the torch if requested.
-        if (torch) {
-            self.turnTorchOn()
-        }
-        
         device.addObserver(self, forKeyPath: #keyPath(AVCaptureDevice.torchMode), options: .new, context: nil)
         captureSession!.beginConfiguration()
+        
+        // Check the zoom factor at switching from ultra wide camera to wide camera.
+        standardZoomFactor = 1
+        #if os(iOS)
+        if #available(iOS 13.0, *) {
+            for (index, actualDevice) in device.constituentDevices.enumerated() {
+                if (actualDevice.deviceType != .builtInUltraWideCamera) {
+                    if index > 0 && index <= device.virtualDeviceSwitchOverVideoZoomFactors.count {
+                        standardZoomFactor = CGFloat(truncating: device.virtualDeviceSwitchOverVideoZoomFactors[index - 1])
+                    }
+                    break
+                }
+            }
+        }
+        #endif
         
         // Add device input
         do {
             let input = try AVCaptureDeviceInput(device: device)
             captureSession!.addInput(input)
         } catch {
-            result(FlutterError(code: "MobileScanner", message: error.localizedDescription, details: nil))
+            result(FlutterError(
+                code: MobileScannerErrorCodes.CAMERA_ERROR,
+                message: error.localizedDescription, details: nil))
             return
         }
         captureSession!.sessionPreset = AVCaptureSession.Preset.photo
-        // Add video output.
-        let videoOutput = AVCaptureVideoDataOutput()
         
+        // Add video output
+        let videoOutput = AVCaptureVideoDataOutput()
         videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
         videoOutput.alwaysDiscardsLateVideoFrames = true
-        
+
         videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue.main)
         captureSession!.addOutput(videoOutput)
-        for connection in videoOutput.connections {
-            // connection.videoOrientation = .portrait
+        let orientation = self.getVideoOrientation()
+
+        // Adjust orientation for the video connection
+        if let connection = videoOutput.connections.first {
+            if connection.isVideoOrientationSupported {
+                connection.videoOrientation = orientation
+            }
+            
             if position == .front && connection.isVideoMirroringSupported {
                 connection.isVideoMirrored = true
             }
         }
+        
         captureSession!.commitConfiguration()
-        captureSession!.startRunning()
-        let dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
-        let size = ["width": Double(dimensions.width), "height": Double(dimensions.height)]
 
-        let answer: [String : Any?] = [
-            "textureId": textureId,
-            "size": size,
-            "currentTorchState": device.hasTorch ? device.torchMode.rawValue : -1,
-        ]
-        result(answer)
-    }
+        // Move startRunning to a background thread to avoid blocking the main UI thread.
+        DispatchQueue.global(qos: .background).async {
+            self.captureSession!.startRunning()
 
-    // TODO: this method should be removed when iOS and MacOS share their implementation.
-    private func toggleTorchInternal() {
-        guard let device = self.device else {
-            return
-        }
-        
-        if (!device.hasTorch) {
-            return
-        }
-        
-        if #available(macOS 15.0, *) {
-            if(!device.isTorchAvailable) {
-                return
+            DispatchQueue.main.async {
+                let dimensions: CMVideoDimensions
+                
+                if let device = self.device {
+                    dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+                } else {
+                    dimensions = CMVideoDimensions()
+                }
+                
+                // Return the result on the main thread after the session starts.
+                var width = Double(dimensions.width)
+                var height = Double(dimensions.height)
+                
+#if os(iOS)
+                // Swap width and height if the image is in portrait mode
+                if orientation == AVCaptureVideoOrientation.portrait || orientation == AVCaptureVideoOrientation.portraitUpsideDown {
+                    let temp = width
+                    width = height
+                    height = temp
+                }
+#endif
+                
+                // Turn on the torch if requested.
+                if (torch) {
+                    self.turnTorchOn()
+                }
+
+                let size = ["width": width, "height": height]
+                
+                let answer: [String : Any?]
+                
+                if let device = self.device {
+                    answer = [
+                        "textureId": self.textureId,
+                        "size": size,
+                        "currentTorchState": device.hasTorch ? device.torchMode.rawValue : -1,
+                    ]
+                } else {
+                    answer = [
+                        "textureId": self.textureId,
+                        "size": size,
+                        "currentTorchState": -1,
+                    ]
+                }
+                
+                result(answer)
             }
         }
-        
-        var newTorchMode: AVCaptureDevice.TorchMode = device.torchMode
-        
-        switch(device.torchMode) {
-        case AVCaptureDevice.TorchMode.auto:
-            if #available(macOS 10.15, *) {
-                newTorchMode = device.isTorchActive ? AVCaptureDevice.TorchMode.off : AVCaptureDevice.TorchMode.on
-            }
-            break;
-        case AVCaptureDevice.TorchMode.off:
-            newTorchMode = AVCaptureDevice.TorchMode.on
-            break;
-        case AVCaptureDevice.TorchMode.on:
-            newTorchMode = AVCaptureDevice.TorchMode.off
-            break;
-        default:
-            return;
-        }
-        
-        if (!device.isTorchModeSupported(newTorchMode) || device.torchMode == newTorchMode) {
-            return;
-        }
-
-        do {
-            try device.lockForConfiguration()
-            device.torchMode = newTorchMode
-            device.unlockForConfiguration()
-        } catch(_) {}
     }
     
     /// Turn the torch on.
@@ -408,23 +471,156 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             try device.lockForConfiguration()
             device.torchMode = .on
             device.unlockForConfiguration()
-        } catch(_) {}
+        } catch(_) {
+            
+        }
     }
     
-    /// Reset the zoom scale.
-    private func resetScale(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
-        // The zoom scale is not yet supported on MacOS.
-        result(nil)
-    }
-    
-    /// Set the zoom scale.
+    /// Sets the zoomScale.
     private func setScale(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
-        // The zoom scale is not yet supported on MacOS.
-        result(nil)
+        let scale = call.arguments as? CGFloat
+        if (scale == nil) {
+            result(FlutterError(code: MobileScannerErrorCodes.GENERIC_ERROR,
+                                message: MobileScannerErrorCodes.INVALID_ZOOM_SCALE_ERROR_MESSAGE,
+                                details: "The invalid zoom scale was nil."))
+            return
+        }
+        do {
+            try setScaleInternal(scale!)
+            result(nil)
+        } catch MobileScannerError.zoomWhenStopped {
+            result(FlutterError(code: MobileScannerErrorCodes.SET_SCALE_WHEN_STOPPED_ERROR,
+                                message: MobileScannerErrorCodes.SET_SCALE_WHEN_STOPPED_ERROR_MESSAGE,
+                                details: nil))
+        } catch MobileScannerError.zoomError(let error) {
+            result(FlutterError(code: MobileScannerErrorCodes.GENERIC_ERROR,
+                                message: error.localizedDescription,
+                                details: nil))
+        } catch {
+            result(FlutterError(code: MobileScannerErrorCodes.GENERIC_ERROR,
+                                message: MobileScannerErrorCodes.GENERIC_ERROR_MESSAGE,
+                                details: nil))
+        }
+    }
+
+    /// Reset the zoomScale.
+    private func resetScale(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
+        do {
+            try resetScaleInternal()
+            result(nil)
+        } catch MobileScannerError.zoomWhenStopped {
+            result(FlutterError(code: MobileScannerErrorCodes.SET_SCALE_WHEN_STOPPED_ERROR,
+                                message: MobileScannerErrorCodes.SET_SCALE_WHEN_STOPPED_ERROR_MESSAGE,
+                                details: nil))
+        } catch MobileScannerError.zoomError(let error) {
+            result(FlutterError(code: MobileScannerErrorCodes.GENERIC_ERROR,
+                                message: error.localizedDescription,
+                                details: nil))
+        } catch {
+            result(FlutterError(code: MobileScannerErrorCodes.GENERIC_ERROR,
+                                message: MobileScannerErrorCodes.GENERIC_ERROR_MESSAGE,
+                                details: nil))
+        }
+    }
+    
+    /// Set the zoom factor of the camera
+    func setScaleInternal(_ scale: CGFloat) throws {
+
+        if (device == nil) {
+            throw MobileScannerError.zoomWhenStopped
+        }
+        
+        do {
+            #if os(iOS)
+                try device.lockForConfiguration()
+                let maxZoomFactor = device.activeFormat.videoMaxZoomFactor
+                
+                var actualScale = (scale * 4) + 1
+                
+                // Set maximum zoomrate of 5x
+                actualScale = min(5.0, actualScale)
+                
+                // Limit to max rate of camera
+                actualScale = min(maxZoomFactor, actualScale)
+                
+                // Limit to 1.0 scale
+
+                device.videoZoomFactor = actualScale
+
+
+                device.unlockForConfiguration()
+            #endif
+        } catch {
+            throw MobileScannerError.zoomError(error)
+        }
+        
+    }
+
+    /// Reset the zoom factor of the camera
+    func resetScaleInternal() throws {
+        if (device == nil) {
+            throw MobileScannerError.zoomWhenStopped
+        }
+
+        do {
+            #if os(iOS)
+                try device.lockForConfiguration()
+                device.videoZoomFactor = standardZoomFactor
+                device.unlockForConfiguration()
+            #endif
+        } catch {
+            throw MobileScannerError.zoomError(error)
+        }
     }
     
     private func toggleTorch(_ result: @escaping FlutterResult) {
-        self.toggleTorchInternal()
+        guard let device = self.device else {
+            result(nil)
+            return
+        }
+        
+        if (!device.hasTorch) {
+            result(nil)
+            return
+        }
+        
+        if #available(macOS 15.0, *) {
+            if(!device.isTorchAvailable) {
+                result(nil)
+                return
+            }
+        }
+        
+        var newTorchMode: AVCaptureDevice.TorchMode = device.torchMode
+        
+        switch(device.torchMode) {
+        case AVCaptureDevice.TorchMode.auto:
+            if #available(macOS 10.15, *) {
+                newTorchMode = device.isTorchActive ? AVCaptureDevice.TorchMode.off : AVCaptureDevice.TorchMode.on
+            }
+            break;
+        case AVCaptureDevice.TorchMode.off:
+            newTorchMode = AVCaptureDevice.TorchMode.on
+            break;
+        case AVCaptureDevice.TorchMode.on:
+            newTorchMode = AVCaptureDevice.TorchMode.off
+            break;
+        default:
+            result(nil)
+            return;
+        }
+        
+        if (!device.isTorchModeSupported(newTorchMode) || device.torchMode == newTorchMode) {
+            result(nil)
+            return;
+        }
+
+        do {
+            try device.lockForConfiguration()
+            device.torchMode = newTorchMode
+            device.unlockForConfiguration()
+        } catch(_) {}
+        
         result(nil)
     }
 
@@ -450,6 +646,66 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         textureId = nil
         
         result(nil)
+    }
+    
+    func analyzeImage(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
+        let argReader = MapArgumentReader(call.arguments as? [String: Any])
+        let symbologies:[VNBarcodeSymbology] = argReader.toSymbology()
+        
+        guard let filePath: String = argReader.string(key: "filePath") else {
+            result(nil)
+            return
+        }
+        
+        let fileUrl = URL(fileURLWithPath: filePath)
+        
+        guard let ciImage = CIImage(contentsOf: fileUrl) else {
+            result(nil)
+            return
+        }
+        
+        let imageRequestHandler = VNImageRequestHandler(ciImage: ciImage, orientation: CGImagePropertyOrientation.up, options: [:])
+        
+        do {
+            let barcodeRequest: VNDetectBarcodesRequest = VNDetectBarcodesRequest(
+                completionHandler: { [] (request, error) in
+                    
+                if error != nil {
+                    DispatchQueue.main.async {
+                        result(FlutterError(
+                            code: MobileScannerErrorCodes.BARCODE_ERROR,
+                            message: error?.localizedDescription, details: nil))
+                    }
+                    return
+                }
+                    
+                guard let barcodes: [VNBarcodeObservation] = request.results as? [VNBarcodeObservation] else {
+                    return
+                }
+                    
+                if barcodes.isEmpty {
+                    return
+                }
+                    
+                result([
+                    "name": "barcode",
+                    "data": barcodes.map({ $0.toMap(width: 1, height: 1) }),
+                ])
+            })
+            
+            if !symbologies.isEmpty {
+                // Add the symbologies the user wishes to support.
+                barcodeRequest.symbologies = symbologies
+            }
+            
+            try imageRequestHandler.perform([barcodeRequest])
+        } catch let error {
+            DispatchQueue.main.async {
+                result(FlutterError(
+                    code: MobileScannerErrorCodes.BARCODE_ERROR,
+                    message: error.localizedDescription, details: nil))
+            }
+        }
     }
     
     // Observer for torch state
@@ -517,7 +773,7 @@ extension CGImage {
         
         let formatHint: CFString
         
-        if #available(macOS 11.0, *) {
+        if #available(iOS 14.0, macOS 11.0, *) {
             formatHint = UTType.jpeg.identifier as CFString
         } else {
             formatHint = kUTTypeJPEG
@@ -542,17 +798,41 @@ extension CGImage {
 }
 
 extension VNBarcodeObservation {
-    public func toMap() -> [String: Any?] {
-        return [
-            "rawValue": self.payloadStringValue ?? "",
-            "format": self.symbology.toInt ?? -1,
-        ]
+    private func distanceBetween(_ p1: CGPoint, _ p2: CGPoint) -> CGFloat {
+        return sqrt(pow(p1.x - p2.x, 2) + pow(p1.y - p2.y, 2))
+    }
+    
+    public func toMap(width: Int, height: Int) -> [String: Any?] {
+        let topLeftX = topLeft.x * CGFloat(width)
+        let topRightX = topRight.x * CGFloat(width)
+        let bottomRightX = bottomRight.x * CGFloat(width)
+        let bottomLeftX = bottomLeft.x * CGFloat(width)
+        let topLeftY = (1 - topLeft.y) * CGFloat(height)
+        let topRightY = (1 - topRight.y) * CGFloat(height)
+        let bottomRightY = (1 - bottomRight.y) * CGFloat(height)
+        let bottomLeftY = (1 - bottomLeft.y) * CGFloat(height)
+        let data = [
+            "corners":  [
+                ["x": bottomLeftX, "y": bottomLeftY],
+                ["x": topLeftX, "y": topLeftY],
+                ["x": topRightX, "y": topRightY],
+                ["x": bottomRightX, "y": bottomRightY],
+            ],
+            "format": symbology.toInt ?? -1,
+            "rawValue": payloadStringValue ?? "",
+            "displayValue": payloadStringValue ?? "",
+            "size": [
+                "width": distanceBetween(topLeft, topRight) * CGFloat(width),
+                "height": distanceBetween(topLeft, bottomLeft) * CGFloat(width),
+            ],
+        ] as [String : Any]
+        return data
     }
 }
 
 extension VNBarcodeSymbology {
     static func fromInt(_ mapValue:Int) -> VNBarcodeSymbology? {
-        if #available(macOS 12.0, *) {
+        if #available(iOS 15.0, macOS 12.0, *) {
             if(mapValue == 8){
                 return VNBarcodeSymbology.codabar
             }
@@ -585,8 +865,8 @@ extension VNBarcodeSymbology {
         }
     }
 
-    var toInt:Int? {
-        if #available(macOS 12.0, *) {
+    var toInt: Int? {
+        if #available(iOS 15.0, macOS 12.0, *) {
             if(self == VNBarcodeSymbology.codabar){
                 return 8
             }

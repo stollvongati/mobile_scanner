@@ -35,8 +35,8 @@ See the example app for detailed implementation information.
 
 | Features               | Android            | iOS                | macOS                | Web |
 |------------------------|--------------------|--------------------|----------------------|-----|
-| analyzeImage (Gallery) | :heavy_check_mark: | :heavy_check_mark: | :x:                  | :x: |
-| returnImage            | :heavy_check_mark: | :heavy_check_mark: | :x:                  | :x: |
+| analyzeImage (Gallery) | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark:   | :x: |
+| returnImage            | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark:   | :x: |
 | scanWindow             | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark:   | :x: |
 
 ## Platform Support
@@ -60,6 +60,7 @@ dev.steenbakker.mobile_scanner.useUnbundled=true
 ```
 
 ### iOS
+
 **Add the following keys to your Info.plist file, located in <project root>/ios/Runner/Info.plist:**
 NSCameraUsageDescription - describe why your app needs access to the camera. This is called Privacy - Camera Usage Description in the visual editor.
 
@@ -83,8 +84,8 @@ Ensure that you granted camera permission in XCode -> Signing & Capabilities:
 
 ## Web
 
-As of version 5.0.0 adding the library to the `index.html` is no longer required,
-as the library is automatically loaded on first use.
+As of version 5.0.0 adding the barcode scanning library script to the `index.html` is no longer required,
+as the script is automatically loaded on first use.
 
 ### Providing a mirror for the barcode scanning library
 
@@ -127,7 +128,7 @@ class MyState extends State<MyStatefulWidget> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // If the controller is not ready, do not try to start or stop it.
     // Permission dialogs can trigger lifecycle changes before the controller is ready.
-    if (!controller.value.isInitialized) {
+    if (!controller.value.hasCameraPermission) {
       return;
     }
 
