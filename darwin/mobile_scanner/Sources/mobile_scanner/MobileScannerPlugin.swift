@@ -45,7 +45,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     
     var position = AVCaptureDevice.Position.back
     
-    var standardZoomFactor: CGFloat = 1
+    var standardZoomFactor: CGFloat = 2
     
     public static func register(with registrar: FlutterPluginRegistrar) {
         #if os(iOS)
@@ -486,7 +486,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             return
         }
         do {
-            try setScaleInternal(scale!)
+//            try setScaleInternal(scale!)
             result(nil)
         } catch MobileScannerError.zoomWhenStopped {
             result(FlutterError(code: MobileScannerErrorCodes.SET_SCALE_WHEN_STOPPED_ERROR,
